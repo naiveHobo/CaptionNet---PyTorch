@@ -1,8 +1,8 @@
 import pandas as pd
+import os
 
-
-def load_flickr(path):
-    with open(path, 'r') as flickr:
+def load_flickr(img_dir, annot_path):
+    with open(annot_path, 'r') as flickr:
         data = flickr.readlines()
 
     df = pd.DataFrame()
@@ -13,7 +13,7 @@ def load_flickr(path):
     for line in data:
         splits = line.replace('\n', '').split('\t')
         if int(splits[0].split('#')[1]) == 4:
-            filenames.append('./data/Flickr8k_Dataset/Flicker8k_Dataset/'+splits[0].split('#')[0])
+            filenames.append(os.path.join(img_dir, splits[0].split('#')[0]))
             captions.append(splits[1])
 
     df['filename'] = filenames
