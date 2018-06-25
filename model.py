@@ -7,9 +7,12 @@ from PIL import Image
 from tqdm import tqdm
 import matplotlib.pyplot as plt
 from torch.nn.utils.rnn import pack_padded_sequence
+from torch.autograd import Variable
+import torch.onnx
 import torchvision.models as models
 from torchvision import transforms
 from data_handler import DataHandler
+
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
@@ -21,38 +24,22 @@ class CaptionNet(nn.Module):
 
         if data_handler is None:
             data_handler = DataHandler()
-            data_handler.load_data('./data/processed.pkl.gz')
+            data_handler.load_data('./data/process.pkl.gz')
 
-        if config.encoder_model == 'resnet':
-            data_handler.img_size = 224
-            encoder = models.resnet101(pretrained='imagenet')
-        elif config.encoder_model == 'alexnet':
-            data_handler.img_size = 256
-            encoder = models.alexnet(pretrained='imagenet')
-        elif config.encoder_model == 'vgg':
-            data_handler.img_size = 224
-            encoder = models.vgg16_bn(pretrained='imagenet')
-        elif config.encoder_model == 'squeezenet':
-            data_handler.img_size = 224
-            encoder = models.squeezenet1_1(pretrained='imagenet')
-        else:
-            data_handler.img_size = 299
-            encoder = models.inception_v3(pretrained='imagenet')
-
-        modules = list(encoder.children())[:-1]
-        self.encoder = nn.Sequential(*modules)
-        self.linear_en = nn.Linear(encoder.fc.in_features, data_handler.embed_size)
-        self.bn = nn.BatchNorm1d(data_handler.embed_size, momentum=0.01)
-        self.embed = nn.Embedding(data_handler.embeddings.shape[0], data_handler.embeddings.shape[1])
-        self.embed.weight = nn.Parameter(torch.from_numpy(data_handler.embeddings.astype(np.float32)))
-        self.lstm = nn.LSTM(data_handler.embed_size, config.hidden_size, config.num_layers, batch_first=True)
-        self.linear_de_1 = nn.Linear(config.hidden_size, 512)
-        self.linear_de_2 = nn.Linear(512, data_handler.vocab_size)
+        encoder = models.resnet152(pretrained=True).cuda()
+        modules = list(encoder.children())
+        self.encoder = nn.Sequential(*modules[:-1])
+        self.linear_en = nn.Linear(modules[-1].in_features, 256)
+        self.bn = nn.BatchNorm1d(256, momentum=0.01)
+        self.embed = nn.Embedding(9956, 256)
+        # self.embed.weight = nn.Parameter(torch.from_numpy(data_handler.embeddings.astype(np.float32)))
+        self.lstm = nn.LSTM(256, 512, 1, batch_first=True)
+        self.linear_de = nn.Linear(512, 9956)
         self.max_length = data_handler.max_length
         self.data_handler = data_handler
         self.config = config
 
-    def forward(self, images, captions, lengths):
+    def forward_1(self, images, captions, lengths):
         """Extract feature vectors from input images."""
         with torch.no_grad():
             features = self.encoder(images)
@@ -64,12 +51,12 @@ class CaptionNet(nn.Module):
         embeddings = torch.cat((features.unsqueeze(1), embeddings), 1)
         packed = pack_padded_sequence(embeddings, lengths, batch_first=True)
         hiddens, _ = self.lstm(packed)
-        outputs = self.linear_de_1(hiddens[0])
-        outputs = self.linear_de_2(outputs)
+        outputs = self.linear_de(hiddens[0])
         return outputs
 
-    def sample(self, images, states=None):
+    def forward(self, images):
         """Generate captions for given image using greedy search."""
+        states = None
         sampled_ids = []
         with torch.no_grad():
             features = self.encoder(images)
@@ -80,8 +67,7 @@ class CaptionNet(nn.Module):
         inputs = features.unsqueeze(1)
         for i in range(self.max_length):
             hiddens, states = self.lstm(inputs, states)
-            outputs = self.linear_de_1(hiddens.squeeze(1))
-            outputs = self.linear_de_2(outputs)
+            outputs = self.linear_de(hiddens.squeeze(1))
             _, predicted = outputs.max(1)
             sampled_ids.append(predicted)
             inputs = self.embed(predicted)
@@ -89,7 +75,7 @@ class CaptionNet(nn.Module):
         sampled_ids = torch.stack(sampled_ids, 1)
         return sampled_ids
 
-    def train(self):
+    def train_model(self):
         """Trains the network"""
         if not os.path.exists(self.config.train_dir):
             os.makedirs(self.config.train_dir)
@@ -123,7 +109,7 @@ class CaptionNet(nn.Module):
                                                   collate_fn=self.data_handler.collate_fn)
 
         loss_fn = nn.CrossEntropyLoss()
-        params = list(self.embed.parameters()) + list(self.lstm.parameters()) + list(self.linear_de_1.parameters()) + list(self.linear_de_2.parameters()) + list(self.linear_en.parameters()) + list(self.bn.parameters())
+        params = list(list(self.lstm.parameters()) + list(self.linear_de.parameters()) + list(self.linear_en.parameters()) + list(self.bn.parameters()))
         optimizer = torch.optim.Adam(params, lr=self.config.learning_rate)
 
         global_step = current_step
@@ -137,7 +123,7 @@ class CaptionNet(nn.Module):
 
                     targets = pack_padded_sequence(captions, lengths, batch_first=True)[0]
 
-                    outputs = self.forward(images, captions, lengths)
+                    outputs = self.forward_1(images, captions, lengths)
 
                     loss = loss_fn(outputs, targets)
                     self.zero_grad()
@@ -155,7 +141,6 @@ class CaptionNet(nn.Module):
 
                     global_step += 1
                     pbar.update(self.config.batch_size)
-                    sys.exit(0)
 
     def predict(self, image):
         """Runs inference on a sample image and return the caption"""
@@ -186,8 +171,8 @@ class CaptionNet(nn.Module):
 
         transform = transforms.Compose([
             transforms.ToTensor(),
-            transforms.Normalize(self.data_handler.mean,
-                                 self.data_handler.std)])
+            transforms.Normalize((0.485, 0.456, 0.406),
+                                 (0.229, 0.224, 0.225))])
 
         image_resized = image.resize([self.data_handler.img_size, self.data_handler.img_size], Image.LANCZOS)
 
@@ -196,12 +181,12 @@ class CaptionNet(nn.Module):
 
         image_tensor = image_resized.to(device)
 
-        sampled_ids = self.sample(image_tensor)
+        sampled_ids = self.forward(image_tensor)
         sampled_ids = sampled_ids[0].cpu().numpy()
 
         sampled_caption = []
         for word_id in sampled_ids:
-            word = self.data_handler.word_id[word_id]
+            word = self.data_handler.wordmap[word_id]
             sampled_caption.append(word)
             if word == self.data_handler.END:
                 break
@@ -209,3 +194,9 @@ class CaptionNet(nn.Module):
 
         print sentence
         plt.imshow(np.asarray(image))
+
+    def export_to_onnx(self, path='./model/CaptionNet.onnx'):
+        """Exports model to onnx"""
+        input_var = Variable(torch.randn(1, 3, 224, 224)).cuda()
+        torch.onnx.export(self, input_var, path)
+        print '\nExported model to onnx'

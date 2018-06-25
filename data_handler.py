@@ -17,7 +17,7 @@ class DataHandler(data.Dataset):
         self.img_size = 224
         self.vocab_size = 0
         self.vocab = {}
-        self.word_id = {}
+        self.wordmap = {}
         self.embeddings = None
         self.embed_size = 300
         self.PAD = '<pad>'
@@ -25,8 +25,6 @@ class DataHandler(data.Dataset):
         self.START = '<start>'
         self.END = '<end>'
         self.augment = None
-        self.mean = None #np.array([0.45803204, 0.4461004, 0.4039198])
-        self.std = None #np.array([0.24218813, 0.23319727, 0.23719482])
 
     def __getitem__(self, index):
         """Returns an image and caption pair from the dataset"""
@@ -57,20 +55,20 @@ class DataHandler(data.Dataset):
         print "\nBuilding vocabulary..."
 
         self.vocab = {self.PAD: 0, self.UNKNOWN: 1, self.START: 2, self.END: 3}
-        self.word_id = {0: self.PAD, 1: self.UNKNOWN, 2: self.START, 3: self.END}
+        self.wordmap = {0: self.PAD, 1: self.UNKNOWN, 2: self.START, 3: self.END}
 
         with tqdm(total=self.data.shape[0]) as pbar:
             for i, row in self.data.iterrows():
                 caption = row['caption'].decode('utf').lower()
                 caption = re.sub(r'[^\w\s\']', '', caption)
 
-                tokens = word_tokenize(caption)
+                tokens = caption.split(' ')
                 tokens = tokens[:self.max_length]
 
                 for token in tokens:
                     if token not in self.vocab:
                         self.vocab[token] = len(self.vocab)
-                        self.word_id[self.vocab[token]] = token
+                        self.wordmap[self.vocab[token]] = token
 
                 caption = " ".join(tokens)
                 self.data.at[i, 'caption'] = caption
@@ -107,21 +105,16 @@ class DataHandler(data.Dataset):
 
         print "\nPadding was successful!"
 
-    def resize_images(self, out_path):
-        """Resizes images in the dataset and calculates mean and standard deviation"""
+    def resize_images(self, out_path, img_size):
+        """Resizes images in the dataset"""
         assert self.data is not None, "No data has been loaded yet, call DataHandler.read()"
 
         if not os.path.exists(out_path):
             os.makedirs(out_path)
 
-        if self.mean is None and self.std is None:
-            self.mean = np.zeros(3)
-            self.std = np.zeros(3)
-            calc_mean = True
-        else:
-            calc_mean = False
+        self.img_size = img_size
 
-        print "\nResizing images and calculating mean and standard deviation..."
+        print "\nResizing images..."
 
         with tqdm(total=self.data.shape[0]) as pbar:
             for i, row in self.data.iterrows():
@@ -132,16 +125,7 @@ class DataHandler(data.Dataset):
                 image.save(os.path.join(out_path, img_name), image.format)
                 self.data.at[i, 'filename'] = os.path.join(out_path, img_name)
 
-                if calc_mean:
-                    image = np.array(image)
-                    self.mean += np.mean(image, axis=(0, 1))
-                    self.std += np.std(image, axis=(0, 1))
-
                 pbar.update(1)
-
-        if calc_mean:
-            self.mean /= self.data.shape[0] * 255
-            self.std /= self.data.shape[0] * 255
 
     def load_embeddings(self, embed_path, embed_size=300):
         """Loads pre-trained embeddings"""
@@ -149,8 +133,14 @@ class DataHandler(data.Dataset):
 
         print "\nLoading pre-trained embeddings..."
 
-        self.embeddings = np.random.uniform(-0.1, 0.1, [len(self.vocab), embed_size])
-        self.embeddings[self.vocab[self.PAD]] = np.zeros(embed_size, dtype=np.float32)
+        embed = []
+        vocab = {self.PAD: 0, self.UNKNOWN: 1, self.START: 2, self.END: 3}
+        wordmap = {0: self.PAD, 1: self.UNKNOWN, 2: self.START, 3: self.END}
+
+        embed.append(np.zeros(embed_size, dtype=np.float32))
+        embed.append(np.random.uniform(-0.1, 0.1, embed_size))
+        embed.append(np.random.uniform(-0.1, 0.1, embed_size))
+        embed.append(np.random.uniform(-0.1, 0.1, embed_size))
 
         with gzip.open(embed_path, 'r') as fEmbeddings:
             for i, line in tqdm(enumerate(fEmbeddings)):
@@ -159,9 +149,16 @@ class DataHandler(data.Dataset):
 
                 if word in self.vocab:
                     vector = np.array([float(num) for num in split[1:]], dtype=np.float32)
-                    self.embeddings[self.vocab[word]] = vector
+                    embed.append(vector)
+                    vocab[word] = len(vocab)
+                    wordmap[vocab[word]] = word
 
-        print "\nSuccessfully loaded pre-trained embeddings!"
+        self.vocab_size = len(vocab)
+        self.vocab = vocab
+        self.wordmap = wordmap
+        self.embeddings = np.array(embed, dtype=np.float32)
+
+        print "\nSuccessfully loaded pre-trained GloVe embeddings!"
 
     def get_word_id(self, token):
         """Returns the id of a token"""
@@ -179,9 +176,7 @@ class DataHandler(data.Dataset):
 
         data = {'embeddings': self.embeddings,
                 'vocab': self.vocab,
-                'wordmap': self.word_id,
-                'mean': self.mean,
-                'std': self.std
+                'wordmap': self.wordmap,
                 }
 
         with gzip.open(out_path, 'wb') as out_file:
@@ -199,9 +194,7 @@ class DataHandler(data.Dataset):
         self.embed_size = self.embeddings.shape[1]
         self.vocab = data['vocab']
         self.vocab_size = len(self.vocab)
-        self.word_id = data['wordmap']
-        self.mean = data['mean']
-        self.std = data['std']
+        self.wordmap = data['wordmap']
 
         print "\nSuccessfully loaded data from {}".format(path)
 
