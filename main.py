@@ -57,16 +57,16 @@ if args.mode == "train":
     flickr = load_flickr(args.img_dir, args.annot_path)
     data = DataHandler(flickr)
 
-    if os.path.isfile('./data/processed.pkl.gz'):
-        data.load_data('./data/processed.pkl.gz')
+    if os.path.isfile('./data/process.pkl.gz'):
+        data.load_data('./data/process.pkl.gz')
     else:
         data.build_vocab()
 
     data.resize_images('./data/resized', img_size=input_size['resnet'])
     data.pad_data()
 
-    if not os.path.isfile('./data/processed.pkl.gz'):
-        data.save_data('./data/processed.pkl.gz')
+    if not os.path.isfile('./data/process.pkl.gz'):
+        data.save_data('./data/process.pkl.gz')
 
     transform = transforms.Compose([
         transforms.RandomHorizontalFlip(),
